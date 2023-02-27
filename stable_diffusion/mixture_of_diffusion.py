@@ -158,7 +158,7 @@ class StableDiffusion(nn.Module):
         return 0 # dummy loss value
 
     def produce_latents(self, text_embeddings, height=512, width=512, num_inference_steps=50, guidance_scale=7.5,
-                        latents=None):
+                        latents=None, bg_aug_end=1000):
 
         if latents is None:
             latents = torch.randn((1, self.unet.in_channels, height // 8, width // 8), device=self.device)
@@ -178,7 +178,7 @@ class StableDiffusion(nn.Module):
                     noise_pred_text = None
                     for style_i, mask in enumerate(self.masks):
                         if style_i < len(self.masks) - 1:
-                            if t > 900:
+                            if t > bg_aug_end:
                                 rand_rgb = torch.rand([1, 3, 1, 1]).cuda()
                                 black_background = torch.ones([1, 3, height, width]).cuda()*rand_rgb
                                 black_latent = self.encode_imgs(black_background)
@@ -201,100 +201,6 @@ class StableDiffusion(nn.Module):
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_pred, t, latents)['prev_sample']
 
-        return latents
-
-    def _produce_latents(self, text_embeddings, height=512, width=512, num_inference_steps=50, guidance_scale=7.5,
-                        latents=None):
-
-        if latents is None:
-            latents = torch.randn((1, self.unet.in_channels, height // 8, width // 8), device=self.device)
-
-        self.scheduler.set_timesteps(num_inference_steps)
-        n_styles = text_embeddings.shape[0]-1
-        print(n_styles, len(self.masks))
-        assert n_styles == len(self.masks)
-
-        with torch.autocast('cuda'):
-            for i, t in enumerate(self.scheduler.timesteps):
-                # expand the latents if we are doing classifier-free guidance to avoid doing two forward passes.
-                latent_model_input = torch.cat([latents] * n_styles)
-
-                # predict the noise residual
-                with torch.no_grad():
-                    noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings[:n_styles],
-                                           attention_control_dict={})['sample']
-                    noise_pred_uncond = noise_pred[:1]
-                    noise_pred_text_cur = self.unet(latents, t, encoder_hidden_states=text_embeddings[n_styles:n_styles+1])['sample']
-                    if n_styles > 1:
-                        noise_pred_text = (noise_pred[1:]*torch.cat(self.masks[:n_styles-1])).sum(0, True)
-                        noise_pred_text = noise_pred_text + noise_pred_text_cur*self.masks[n_styles-1]
-                    else:
-                        noise_pred_text = noise_pred_text_cur*self.masks[n_styles-1]
-
-                # perform guidance
-                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-
-                # compute the previous noisy sample x_t -> x_t-1
-                latents = self.scheduler.step(noise_pred, t, latents)['prev_sample']
-
-        return latents
-
-    # depercated
-    def produce_latents_w_guidance(self, text_embeddings, height=512, width=512, num_inference_steps=50, guidance_scale=7.5,
-                        latents=None, attention_control_dict={}):
-
-        if latents is None:
-            latents = torch.randn((1, self.unet.in_channels, height // 8, width // 8), device=self.device)
-
-        self.scheduler.set_timesteps(num_inference_steps)
-        n_styles = text_embeddings.shape[0]-1
-        print(n_styles, len(self.masks))
-        assert n_styles == len(self.masks)
-
-        with torch.autocast('cuda'):
-            for i, t in enumerate(self.scheduler.timesteps):
-                # expand the latents if we are doing classifier-free guidance to avoid doing two forward passes.
-                # latent_model_input = torch.cat([latents] * 2)
-
-                # predict the noise residual
-                with torch.no_grad():
-                    noise_pred_uncond = self.unet(latents, t, encoder_hidden_states=text_embeddings[:1],
-                                           attention_control_dict={})['sample']
-                    noise_pred_text = None
-                    for style_i, mask in enumerate(self.masks):
-                        if style_i < len(self.masks) - 1:
-                            noise_pred_text_cur = self.unet(latents, t, encoder_hidden_states=text_embeddings[style_i+1:style_i+2],
-                                                        attention_control_dict={})['sample']
-                        else:
-                            noise_pred_text_cur = self.unet(latents, t, encoder_hidden_states=text_embeddings[style_i+1:style_i+2],
-                                                        attention_control_dict=attention_control_dict)['sample']
-                        if noise_pred_text is None:
-                            noise_pred_text = noise_pred_text_cur * mask
-                        else:
-                            noise_pred_text = noise_pred_text + noise_pred_text_cur*mask
-
-                # perform guidance
-                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-
-                # compute the previous noisy sample x_t -> x_t-1
-                latents = self.scheduler.step(noise_pred, t, latents)['prev_sample']
-
-                # apply guidance
-                if t < attention_control_dict['guidance_start_step']:
-                    with torch.enable_grad():
-                        if not latents.requires_grad:
-                            latents.requires_grad = True
-                        # import ipdb;ipdb.set_trace()
-                        latents_0 = self.predict_x0(latents, noise_pred, t)
-                        latents_inp = 1 / 0.18215 * latents_0
-                        imgs = self.vae.decode(latents_inp).sample
-                        imgs = (imgs / 2 + 0.5).clamp(0, 1)
-                        # torchvision.utils.save_image(imgs, 'results/font_color/debug_process_x0/step%d.png'%t)
-                        # loss = (((imgs - attention_control_dict['target_RGB'])*attention_control_dict['color_obj_atten'][:, 0])**2).mean()*100
-                        loss = torch.nn.functional.l1_loss(imgs*attention_control_dict['color_obj_atten'][:, 0], attention_control_dict['target_RGB']*attention_control_dict['color_obj_atten'][:, 0])*100
-                        loss.backward()
-                        print(loss)
-                    latents = (latents - latents.grad * attention_control_dict['color_guidance_weight']).detach().clone()
         return latents
 
     def predict_x0(self, x_t, eps_t, t):
@@ -365,7 +271,7 @@ class StableDiffusion(nn.Module):
         return latents
 
     def prompt_to_img(self, prompts, negative_prompts='', height=512, width=512, num_inference_steps=50,
-                      guidance_scale=7.5, latents=None):
+                      guidance_scale=7.5, latents=None, bg_aug_end=1000):
 
         if isinstance(prompts, str):
             prompts = [prompts]
@@ -377,7 +283,8 @@ class StableDiffusion(nn.Module):
         text_embeds = self.get_text_embeds(prompts, negative_prompts) # [2, 77, 768]
 
         latents = self.produce_latents(text_embeds, height=height, width=width, latents=latents,
-                                    num_inference_steps=num_inference_steps, guidance_scale=guidance_scale) # [1, 4, 64, 64]
+                                    num_inference_steps=num_inference_steps, guidance_scale=guidance_scale,
+                                    bg_aug_end=bg_aug_end) # [1, 4, 64, 64]
         
         # Img latents -> imgs
         imgs = self.decode_latents(latents) # [1, 3, 512, 512]

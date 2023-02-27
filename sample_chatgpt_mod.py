@@ -86,7 +86,8 @@ if __name__ == '__main__':
     # generate the image according to spatial maps and prompts
     guidance.masks = spatial_maps
     seed_everything(seed)
+    bg_aug_end=900
     img = guidance.prompt_to_img(text_prompts, [negative_text], 
                                   height=height, width=width, num_inference_steps=41, 
-                                  guidance_scale=8.5)
+                                  guidance_scale=8.5, bg_aug_end=bg_aug_end)
     imageio.imwrite(os.path.join(save_path, 'seed%d_style.png' % (seed)), img[0])
