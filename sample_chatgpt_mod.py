@@ -83,12 +83,12 @@ if __name__ == '__main__':
     plot_spatial_maps([spatial_maps], [file_name], save_path, seed)
     assert (torch.cat(spatial_maps, 0).sum(0) == 1).all()
     # generate baseline image according to only prompt
-    # seed_everything(seed)
-    # guidance.masks = torch.ones([1, 4,  width//8, height//8]).cuda()
-    # img = guidance.prompt_to_img(text_prompts[-1:], [negative_text], 
-    #                               height=height, width=width, num_inference_steps=41, 
-    #                               guidance_scale=8.5)
-    # imageio.imwrite(os.path.join(save_path, file_name + '_seed%d_base.png' % (seed)), img[0])
+    seed_everything(seed)
+    guidance.masks = torch.ones([1, 4,  width//8, height//8]).cuda()
+    img = guidance.prompt_to_img(text_prompts[-1:], [negative_text], 
+                                  height=height, width=width, num_inference_steps=41, 
+                                  guidance_scale=8.5)
+    imageio.imwrite(os.path.join(save_path, file_name + '_seed%d_base.png' % (seed)), img[0])
 
     # generate the image according to spatial maps and prompts
     guidance.masks = spatial_maps
