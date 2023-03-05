@@ -18,12 +18,12 @@ from functools import partial
 class StableDiffusion(nn.Module):
     def __init__(self, device, v2, min_step, max_step):
         super().__init__()
-
         try:
             with open('./TOKEN', 'r') as f:
                 self.token = f.read().replace('\n', '') # remove the last \n!
                 print(f'[INFO] loaded hugging face access token from ./TOKEN!')
         except FileNotFoundError as e:
+        
             self.token = True
             print(f'[INFO] try to load hugging face access token from the default place, make sure you have run `huggingface-cli login`.')
         
@@ -167,10 +167,10 @@ class StableDiffusion(nn.Module):
         n_styles = text_embeddings.shape[0]-1
         print(n_styles, len(self.masks))
         assert n_styles == len(self.masks)
-
-        with torch.autocast('cuda'):
+        # import pdb; pdb.set_trace()
+        with torch.cuda.amp.autocast():#torch.autocast('cuda'):
             for i, t in enumerate(self.scheduler.timesteps):
-
+                
                 # predict the noise residual
                 with torch.no_grad():
                     noise_pred_uncond = self.unet(latents, t, encoder_hidden_states=text_embeddings[:1],
@@ -199,7 +199,9 @@ class StableDiffusion(nn.Module):
                 noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
                 # compute the previous noisy sample x_t -> x_t-1
+                
                 latents = self.scheduler.step(noise_pred, t, latents)['prev_sample']
+                
 
         return latents
 

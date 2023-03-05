@@ -1,6 +1,7 @@
 results/
 pretrained-guidance
 pretrained-guidance/
+drawbench.csv
 *.code-workspace
 
 # Byte-compiled / optimized / DLL files
