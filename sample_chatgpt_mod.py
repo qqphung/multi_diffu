@@ -63,6 +63,7 @@ if __name__ == '__main__':
     print('boxes', boxes)
     height=512
     width=512
+    boxes = np.array(boxes)
     
     spatial_map_overall = torch.ones([1, 4,  width//8, height//8]).cuda()
     spatial_maps = []
@@ -85,7 +86,7 @@ if __name__ == '__main__':
     # generate baseline image according to only prompt
     seed_everything(seed)
     guidance.masks = torch.ones([1, 4,  width//8, height//8]).cuda()
-    img = guidance.prompt_to_img(text_prompts[-1:], [negative_text], 
+    img = guidance.produce_attn_maps(text_prompts[-1:], [negative_text], 
                                   height=height, width=width, num_inference_steps=41, 
                                   guidance_scale=8.5)
     imageio.imwrite(os.path.join(save_path, file_name + '_seed%d_base.png' % (seed)), img[0])
@@ -94,14 +95,14 @@ if __name__ == '__main__':
     guidance.masks = spatial_maps
     seed_everything(seed)
     bg_aug_end=830 # cang lon cang the prompt cuoi (3 qua trung), cang nho thi cang bi mat background
-    img = guidance.prompt_to_img(text_prompts, [negative_text], 
-                                  height=height, width=width, num_inference_steps=41, 
-                                  guidance_scale=8.5, bg_aug_end=bg_aug_end)
+    img = guidance.prompt_to_img(text_prompts, [negative_text]*len(text_prompts), 
+                                height=height, width=width, num_inference_steps=41, 
+                                guidance_scale=8.5, bg_aug_end=bg_aug_end)
     # img = guidance.prompt_to_img(text_prompts, [negative_text], 
     #                               height=height, width=width, num_inference_steps=41, 
     #                               guidance_scale=10, bg_aug_end=bg_aug_end)
     
-    imageio.imwrite(os.path.join(save_path, file_name + '_seed%d_style.png' % (seed)), img[0])
+    imageio.imwrite(os.path.join(save_path, file_name + '_seed%d_%d_style.png' % (seed, bg_aug_end)), img[0])
 
 
 # 840/ 61

@@ -35,42 +35,20 @@ class StableDiffusion(nn.Module):
         self.v2 = v2
 
         print(f'[INFO] loading stable diffusion...')
-        local_pretrained_dir = f'pretrained-guidance/{"v1" if not v2 else "v2"}'
-        hf_paths = {
-            'v1': 'runwayml/stable-diffusion-v1-5',
-            'v2': 'stabilityai/stable-diffusion-2-1'
-        }
-        # local_paths = {k: local_pretrained_dir for k in hf_paths[f'{"1.5" if not v2 else "2"}'].keys()}
-        if not os.path.isdir(local_pretrained_dir):
-            save_pretrained = True
-            load_paths = hf_paths[f'{"v1" if not v2 else "v2"}']
-            os.makedirs(local_pretrained_dir, exist_ok=True)
-        else:
-            save_pretrained = False
-            load_paths = local_pretrained_dir
+        model_id = 'runwayml/stable-diffusion-v1-5'
 
-        # 1. Load the autoencoder model which will be used to decode the latents into image space. 
-        self.vae = AutoencoderKL.from_pretrained(load_paths, subfolder="vae", use_auth_token=self.token).to(self.device)
+        self.vae = AutoencoderKL.from_pretrained(
+            model_id, subfolder="vae").to(self.device)
+        self.tokenizer = CLIPTokenizer.from_pretrained(
+            model_id, subfolder='tokenizer')
+        self.text_encoder = CLIPTextModel.from_pretrained(
+            model_id, subfolder='text_encoder').to(self.device)
+        self.unet = UNet2DConditionModel.from_pretrained(
+            model_id, subfolder="unet").to(self.device)
 
-        # 2. Load the tokenizer and text encoder to tokenize and encode the text. 
-        self.tokenizer = CLIPTokenizer.from_pretrained(load_paths, subfolder='tokenizer', use_auth_token=self.token)
-        self.text_encoder = CLIPTextModel.from_pretrained(load_paths, subfolder='text_encoder', use_auth_token=self.token).to(self.device)
-        
-        # 3. The UNet model for generating the latents.
-        self.unet = UNet2DConditionModel.from_pretrained(load_paths, subfolder="unet", use_auth_token=self.token).to(self.device)
-        
-        if save_pretrained:
-            self.vae.save_pretrained(os.path.join(local_pretrained_dir, 'vae'))
-            self.tokenizer.save_pretrained(os.path.join(local_pretrained_dir, 'tokenizer'))
-            self.text_encoder.save_pretrained(os.path.join(local_pretrained_dir, 'text_encoder'))
-            self.unet.save_pretrained(os.path.join(local_pretrained_dir, 'unet'))
-
-        # self.scheduler = PNDMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", num_train_timesteps=self.num_train_timesteps)
-        self.scheduler = PNDMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", num_train_timesteps=self.num_train_timesteps,
-                                       skip_prk_steps=True, steps_offset=1)
-        if v2:
-            self.scheduler = DPMSolverMultistepScheduler.from_config('stabilityai/stable-diffusion-2', subfolder="scheduler")
-        self.alphas_cumprod = self.scheduler.alphas_cumprod.to(self.device) 
+        self.scheduler = PNDMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear",
+                                       num_train_timesteps=self.num_train_timesteps, skip_prk_steps=True, steps_offset=1)
+        self.alphas_cumprod = self.scheduler.alphas_cumprod.to(self.device)
 
         self.masks = []
 
@@ -205,6 +183,53 @@ class StableDiffusion(nn.Module):
 
         return latents
 
+    def produce_latents_bg(self, text_embeddings, height=512, width=512, num_inference_steps=50, guidance_scale=7.5,
+                        latents=None, bg_aug_end=1000):
+
+        if latents is None:
+            latents = torch.randn((1, self.unet.in_channels, height // 8, width // 8), device=self.device)
+
+        self.scheduler.set_timesteps(num_inference_steps)
+        n_styles = text_embeddings.shape[0]-1
+        print(n_styles, len(self.masks))
+        # assert n_styles == len(self.masks)
+        # import pdb; pdb.set_trace()
+        masks = torch.cat(self.masks)
+        with torch.cuda.amp.autocast():#torch.autocast('cuda'):
+            for i, t in enumerate(self.scheduler.timesteps):
+                latents_all = []
+                
+                # predict the noise residual
+                with torch.no_grad():
+                    for style_i, mask in enumerate(self.masks):
+                        if style_i < len(self.masks) - 1:
+                            if t > bg_aug_end:
+                                rand_rgb = torch.rand([1, 3, 1, 1]).cuda()
+                                black_background = torch.ones([1, 3, height, width]).cuda()*rand_rgb
+                                black_latent = self.encode_imgs(black_background)
+                                noise = torch.randn_like(black_latent)
+                                black_latent_noisy = self.scheduler.add_noise(black_latent, noise, t)
+                                masked_latent = (mask>0.001) * latents + (mask<0.001) * black_latent_noisy
+                            else:
+                                masked_latent = latents
+                            latents_all.append(masked_latent)
+                        else:
+                            latents_all.append(latents)
+                    latent_model_input = torch.cat(latents_all * 2)
+                    noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings)['sample']
+                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+
+                # perform guidance
+                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+                # compute the previous noisy sample x_t -> x_t-1
+
+                latents = self.scheduler.step(noise_pred, t, latents)['prev_sample']
+                latents = (latents*masks).sum(dim=0, keepdims=True)
+                
+
+        return latents
+
     def predict_x0(self, x_t, eps_t, t):
         alpha_t = self.scheduler.alphas_cumprod[t]
         return (x_t - eps_t * torch.sqrt(1-alpha_t)) / torch.sqrt(alpha_t)
@@ -284,7 +309,7 @@ class StableDiffusion(nn.Module):
         # Prompts -> text embeds
         text_embeds = self.get_text_embeds(prompts, negative_prompts) # [2, 77, 768]
 
-        latents = self.produce_latents(text_embeds, height=height, width=width, latents=latents,
+        latents = self.produce_latents_bg(text_embeds, height=height, width=width, latents=latents,
                                     num_inference_steps=num_inference_steps, guidance_scale=guidance_scale,
                                     bg_aug_end=bg_aug_end) # [1, 4, 64, 64]
         
