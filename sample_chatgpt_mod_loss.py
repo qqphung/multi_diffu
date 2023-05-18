@@ -5,7 +5,7 @@ import imageio
 import argparse
 import numpy as np
 import csv
-from stable_diffusion.mixture_of_diffusion import StableDiffusion
+from stable_diffusion.mixture_of_diffusion_newloss import StableDiffusion
 from stable_diffusion.vis_utils import plot_spatial_maps
 from chatGPT import generate_box, save_img, load_gt, load_box, draw_box
 from PIL import Image
@@ -29,6 +29,60 @@ def format_box(names, boxes):
         result_name.append('a ' + name.replace('_',' '))
        
     return result_name, np.array(boxes)
+
+def remove_numbers(text):
+    result = ''.join([char for char in text if not char.isdigit()])
+    return result
+def process_box_phrase(names, bboxes):
+    d = {}
+    # import pdb; pdb.set_trace()
+    for i, phrase in enumerate(names):
+        phrase = phrase.replace('_',' ')
+        list_noun = phrase.split(' ')
+        for n in list_noun:
+            n = remove_numbers(n)
+            if not n in d.keys():
+                d.update({n:[np.array(bboxes[i])/512]})
+            else:
+                d[n].append(np.array(bboxes[i])/512)
+    return d
+def Pharse2idx_2(prompt, name_box):
+    prompt = prompt.replace('.','')
+    prompt = prompt.replace(',','')
+    prompt_list = prompt.strip('.').split(' ')
+    
+    object_positions = []
+    bbox_to_self_att = []
+    for obj in name_box.keys():
+        obj_position = []
+        in_prompt = False
+        for word in obj.split(' '):
+            if word in prompt_list:
+                obj_first_index = prompt_list.index(word) + 1
+                obj_position.append(obj_first_index)
+                in_prompt = True
+            elif word +'s' in prompt_list:
+                obj_first_index = prompt_list.index(word+'s') + 1
+                obj_position.append(obj_first_index)
+                in_prompt = True
+            elif word +'es' in prompt_list:
+                obj_first_index = prompt_list.index(word+'es') + 1
+                obj_position.append(obj_first_index)
+                in_prompt = True 
+            elif word == 'person':
+                obj_first_index = prompt_list.index('people') + 1
+                obj_position.append(obj_first_index)
+                in_prompt = True 
+            elif word == 'mouse':
+                obj_first_index = prompt_list.index('mice') + 1
+                obj_position.append(obj_first_index)
+                in_prompt = True 
+        if in_prompt :
+            bbox_to_self_att.append(np.array(name_box[obj]))
+        
+            object_positions.append(obj_position)
+
+    return object_positions, bbox_to_self_att
 def read_csv(path_file, t):
     list_prompts = []
     with open(path_file,'r') as f:
@@ -45,7 +99,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--iters',      type=int, default=10000,            help="training iters")
     parser.add_argument('--text',       type=str, default="A hamburger",    help="text prompt")
-    parser.add_argument('--workspace',  type=str, default="HRS_evaluate",        help="workspace to store result")
+    parser.add_argument('--workspace',  type=str, default="HRS_save_loss",        help="workspace to store result")
     parser.add_argument('--min_step',   type=int, default=20,               help="min step, range [0, max_step]")
     parser.add_argument('--max_step',   type=int, default=980,              help="max step, range [min_step, 1000]")
     parser.add_argument('--guidance',   type=float, default=100,            help="guidance scale")
@@ -54,10 +108,10 @@ if __name__ == '__main__':
     parser.add_argument('--foldername', type=str, default="counting",           help="folder name under workspace")
     parser.add_argument('--seed',       type=int, default=0,                help="random seed")
     parser.add_argument('--type', type=str, default="counting",           help="folder name under workspace")
-    parser.add_argument('--data', type=str, default="counting",           help="folder name under workspace")
+    parser.add_argument('--data', type=str, default="drawbench",           help="folder name under workspace")
     opt = parser.parse_args()
     seed = opt.seed
-    # seed_everything(seed)
+
 
     # stable diffusion guidance
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -95,16 +149,23 @@ if __name__ == '__main__':
         else:
             prompts = read_csv('/vulcanscratch/chuonghm/data_evaluate_LLM/drawbench/drawbench.csv','Positional')
             list_data_box = ['/vulcanscratch/chuonghm/data_evaluate_LLM/gpt_generated_box_drawbench/spatial.p']
+    
     for file_box in list_data_box:
         data_boxes = load_box(file_box)
-        for id_img, prompt in enumerate(prompts):
-            # if id_img == 132 or id_img ==2927 or id_img== 2535 or id_img==131 or id_img == 2880 or id_img ==1423: continue
-            # if id_img < 1624: continue
-            # if imd_id == 
+        for id_img, prompt in enumerate(prompts):    
+            # if id_img < 2039: continue
+            #if id_img == 132 or id_img ==2927 or id_img== 2535 or id_img==131 or id_img == 2880 or id_img ==1423: continue
+            # if opt.type=='counting':
+            #     if id_img < 2039: continue
+            # if opt.type=='counting1':
+            #     if id_img < 575 or id_img > 1500: continue 
+            # if id_img != 1627 : continue
             print(id_img)
             text = prompt
             if not prompt in data_boxes.keys(): continue
             names, boxes = data_boxes[prompt]
+            name_box = process_box_phrase(names, boxes)
+            position, box_att = Pharse2idx_2(prompt, name_box)
             boxes = refine_boxes(boxes)
             text_prompts = []
             for name in names:
@@ -137,36 +198,22 @@ if __name__ == '__main__':
             spatial_maps = [spatial_map / torch.cat(spatial_maps, 0).sum(0, keepdim=True) for spatial_map in spatial_maps]
             if not os.path.isdir(save_path):
                 os.mkdir(save_path)
-            # save_path_base = save_path+'_base'
-            # if not os.path.isdir(save_path_base):
-            #     os.mkdir(save_path_base)
-                # print(save_path+'_box')
+          
             file_name = text.replace(' ', '_')
-            # plot_spatial_maps([spatial_maps], [file_name], save_path+'_box', seed)
+            
             assert (torch.cat(spatial_maps, 0).sum(0) == 1).all()
             
             # generate baseline image according to only prompt
-           
-            # guidance.masks = torch.ones([1, 4,  width//8, height//8]).cuda()
-            # img = guidance.produce_attn_maps(text_prompts[-1:], [negative_text], 
-            #                             height=height, width=width, num_inference_steps=41, 
-            #                             guidance_scale=8.5)
-            # imageio.imwrite(os.path.join(save_path, file_name + '_seed%d_base.png' % (seed)), img[0])
-            # save_img(save_path_base, Image.fromarray(img[0]), prompt, 0, id_img)
-            # generate the image according to spatial maps and prompts
-            guidance.masks = spatial_maps
+         
             for i in range(1):
-                
-                # seed_everything(seed)
+                guidance.masks = spatial_maps
+               
                 bg_aug_end=830 # cang lon cang the prompt cuoi (3 qua trung), cang nho thi cang bi mat background
                 img = guidance.prompt_to_img(text_prompts,text_copy, [negative_text]*len(text_prompts), 
                                             height=height, width=width, num_inference_steps=41, 
-                                            guidance_scale=8.5, bg_aug_end=bg_aug_end)
-                # img = guidance.prompt_to_img(text_prompts, [negative_text], 
-                #                               height=height, width=width, num_inference_steps=41, 
-                #                               guidance_scale=10, bg_aug_end=bg_aug_end)
+                                            guidance_scale=8.5, bg_aug_end=bg_aug_end, locations=position,boxes=box_att )
+                
                 save_img(save_path, Image.fromarray(img[0]), prompt, i, id_img)
-            # draw_box(save_path, Image.fromarray(img[0]), prompt, 0, id_img,names, boxes )
-        
+            
 
 # 840/ 61

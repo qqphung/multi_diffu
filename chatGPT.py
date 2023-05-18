@@ -1,7 +1,13 @@
 import os
 import openai
+import pandas as pd
+import pickle 
+import csv 
+from PIL import Image, ImageDraw, ImageFont
+import numpy as np
+from urllib.request import urlopen
 
-openai.api_key = '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'
+openai.api_key = ''
 
 def generate_box(text):
     # example_prompt = "I want you to act as a programmer. I will provide the description of an image, you should output the corresponding layout of this image, the size of the objects should be as large as possible. Each object in the image is one rectangle or square box in the layout. You should return each object and the corresponding coordinate of its boxes. the size of the image is 1024 * 1024.\nthe prompt :\"four cats in the field\", \ncat: (220, 318, 380, 460)\ncat: (440, 220, 714, 460)\ncat: (858, 242, 1002, 560)\ncat: (350, 694, 606, 846)\nthe prompt: \"a cat on the right of a dog on the road\"\ncat: (482, 200, 804, 592)\ndog: (428, 634, 820, 970)\nthe prompt: \"five balls in the room\"\nball: (148, 560, 386, 824)\nball: (84, 138, 420, 404)\nball: (588, 104, 922, 368)\nball: (620, 436, 912, 672)\nball: ( 640, 750, 896, 964)\nthe prompt: \"a cat sitting on the car\"\nBecause the cat sitting on the car so the car bellow the cat and cat in the surface of car, therefore the result\ncat: (305, 384, 590, 600)\ncar: (100, 600, 928, 906)\n"
@@ -61,6 +67,38 @@ def text_list(text):
     result[2] = result[3]
     result[3] = tempt
     return tuple(result)
+
+def save_img(folder_name, img, prompt, iter_id, img_id):
+    os.makedirs(folder_name, exist_ok=True)
+    img_name = str(img_id) + '_' + str(iter_id) + '_' + prompt.replace(' ','_')+'.jpg'
+    img.save(os.path.join(folder_name, img_name))
+# def draw_box(text, boxes,output_folder, img_name,sample ):
+def draw_box(output_folder, sample, prompt, iter_id, img_id, text, boxes):
+    draw = ImageDraw.Draw(sample)
+    font = ImageFont.truetype(urlopen("https://criptolibertad.s3.us-west-2.amazonaws.com/img/fonts/Roboto-LightItalic.ttf"), size=20)
+    for i, box in enumerate(boxes):
+        t = text[i]
+        draw.rectangle([(box[1], box[0]),(box[3], box[2])], outline=128, width=2)
+        draw.text((box[1]+5, box[0]+5), t, fill=200,font=font )
+    img_name = str(img_id) + '_' + str(iter_id) + '_' + prompt.replace(' ','_')+'.jpg'
+    sample.save(os.path.join(output_folder, img_name))
+
+
+def load_gt(csv_pth):
+    gt_data = pd.read_csv(csv_pth).to_dict('records')
+    meta = []
+    syn_prompt = []
+    
+    # import pdb; pdb.set_trace()
+    for sample in gt_data:
+        meta.append(sample['meta_prompt'])
+        syn_prompt.append(sample['synthetic_prompt'])
+    return meta, syn_prompt
+def load_box(pickle_file):
+    with open(pickle_file,'rb') as f:
+        data = pickle.load(f)
+    return data
+
 # def read_csv(path_file):
 #     with open(path_file,'r') as f:
 #         reader = csv.reader(f)

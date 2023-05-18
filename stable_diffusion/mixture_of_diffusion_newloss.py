@@ -1,7 +1,8 @@
 from transformers import CLIPTextModel, CLIPTokenizer, logging
 from diffusers import AutoencoderKL, PNDMScheduler, EulerDiscreteScheduler, DPMSolverMultistepScheduler
-from models.unet_2d_condition import UNet2DConditionModel
-
+from my_model.unet_2d_condition import UNet2DConditionModel
+from copy import deepcopy
+from stable_diffusion.vis_utils import caculate_loss_att_fixed_cnt
 # suppress partial model loading warning
 logging.set_verbosity_error()
 
@@ -54,7 +55,7 @@ class StableDiffusion(nn.Module):
 
         print(f'[INFO] loaded stable diffusion!')
 
-    def get_text_embeds(self, prompt, negative_prompt):
+    def get_text_embeds(self, prompt, negative_prompt, neg=True):
         # prompt, negative_prompt: [str]
         if self.v2:
             print("[INFO] using Stable Diffusion v2, loading new text prompt...")
@@ -66,7 +67,7 @@ class StableDiffusion(nn.Module):
             ]}).json()
             prompt = response["data"]
             print(f'[INFO] loaded new text prompt: {prompt}!')
-
+        # import pdb; pdb.set_trace()
         # Tokenize text and get embeddings
         text_input = self.tokenizer(prompt, padding='max_length', max_length=self.tokenizer.model_max_length, truncation=True, return_tensors='pt')
 
@@ -80,7 +81,10 @@ class StableDiffusion(nn.Module):
             uncond_embeddings = self.text_encoder(uncond_input.input_ids.to(self.device))[0]
 
         # Cat for final embeddings
-        text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
+        if neg:
+            text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
+       
+            
         return text_embeddings
 
 
@@ -182,9 +186,52 @@ class StableDiffusion(nn.Module):
                 
 
         return latents
+    def update_latent(self, latent, locations, boxes,t,index1, text_emb):
+        if index1 < 10:
+            loss_scale = 3
+            max_iter = 5
+        elif index1 < 20:
+            loss_scale = 2
+            max_iter = 5
+        else:
+            loss_scale = 1
+            max_iter = 1
+        loss_threshold = 0.1
+        
+        max_index = 30
+        x = deepcopy(latent) 
+        iteration = 0
+        loss = torch.tensor(10000)
+        print("optimize", index1)
+        while loss.item() > loss_threshold and iteration < max_iter and (index1 < max_index):
+            print('iter', iteration)
+            x = x.requires_grad_(True)
+            
+            e_t,  att_first, att_second, att_third = self.unet(x, t, text_emb)
+            
+            bboxes = boxes
+            object_positions = locations
+            loss = caculate_loss_att_fixed_cnt(att_second,att_first,att_third, bboxes_ori=bboxes,
+                                object_positions_ori=object_positions, t = index1)#*(sigma[index1] **  0.5)
+           
+            print('loss', loss)
+            
+            hh = torch.autograd.backward(loss)
+            
+            grad_cond = x.grad
+            
+            x = x - grad_cond #* (sigma[index1]** 0.3)
+            x = x.detach()
+            iteration += 1
+            torch.cuda.empty_cache()
+        return x
 
+        # nosise, att1, att2, att3 = self.unet(latent)
+        # loss = caculate_loss_att_fixed_cnt(att1, att2, att3, locations, boxes)
+
+        
     def produce_latents_bg(self, text_embeddings,text_embeds_original, height=512, width=512, num_inference_steps=50, guidance_scale=7.5,
-                        latents=None, bg_aug_end=1000):
+                        latents=None, bg_aug_end=1000, locations=None, boxes=None, text_emb_box=None):
 
         if latents is None:
             latents = torch.randn((1, self.unet.in_channels, height // 8, width // 8), device=self.device)
@@ -197,6 +244,8 @@ class StableDiffusion(nn.Module):
         masks = torch.cat(self.masks)
         with torch.cuda.amp.autocast():#torch.autocast('cuda'):
             for i, t in enumerate(self.scheduler.timesteps):
+                
+                latents = self.update_latent(latents,locations, boxes, t, i, text_emb_box)
                 latents_all = []
                 
                 # predict the noise residual
@@ -216,11 +265,13 @@ class StableDiffusion(nn.Module):
                         else:
                             latents_all.append(latents)
                     latent_model_input = torch.cat(latents_all * 2)
+                    # import pdb; pdb.set_trace()
+                    # import pdb; pdb.set_trace()
                     if t > bg_aug_end:
-                        noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings)['sample']
+                        noise_pred, att1, att2, att3 = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings)
                     else:
-                        noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeds_original)['sample']
-                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                        noise_pred, att1, att2, att3 = self.unet(latent_model_input, t, encoder_hidden_states=text_embeds_original)
+                    noise_pred_uncond, noise_pred_text = noise_pred.sample.chunk(2)
 
                 # perform guidance
                 noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
@@ -229,6 +280,7 @@ class StableDiffusion(nn.Module):
 
                 latents = self.scheduler.step(noise_pred, t, latents)['prev_sample']
                 latents = (latents*masks).sum(dim=0, keepdims=True)
+                torch.cuda.empty_cache()
                 
 
         return latents
@@ -301,11 +353,12 @@ class StableDiffusion(nn.Module):
         return latents
 
     def prompt_to_img(self, prompts,prompts_original, negative_prompts='', height=512, width=512, num_inference_steps=50,
-                      guidance_scale=7.5, latents=None, bg_aug_end=1000):
+                      guidance_scale=7.5, latents=None, bg_aug_end=1000, locations=None, boxes=None):
 
         if isinstance(prompts, str):
             prompts = [prompts]
             prompts_original = [prompts_original]
+            box = [prompts_original[-2:-1]]
         
         if isinstance(negative_prompts, str):
             negative_prompts = [negative_prompts]
@@ -313,10 +366,12 @@ class StableDiffusion(nn.Module):
         # Prompts -> text embeds
         text_embeds = self.get_text_embeds(prompts, negative_prompts) # [2, 77, 768]
         text_embeds_original = self.get_text_embeds(prompts_original, negative_prompts)
+        text_embeds_forbox = self.get_text_embeds([prompts_original[-1]], negative_prompts, False) # [2, 77, 768]
+
         
         latents = self.produce_latents_bg(text_embeds,text_embeds_original,  height=height, width=width, latents=latents,
                                     num_inference_steps=num_inference_steps, guidance_scale=guidance_scale,
-                                    bg_aug_end=bg_aug_end) # [1, 4, 64, 64]
+                                    bg_aug_end=bg_aug_end, locations=locations, boxes=boxes, text_emb_box=text_embeds_forbox) # [1, 4, 64, 64]
         
         # Img latents -> imgs
         imgs = self.decode_latents(latents) # [1, 3, 512, 512]
